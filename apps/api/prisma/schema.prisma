@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role { admin attendant accountant customer }
+
+enum SlotType { standard vip handicapped ev }
+
+enum SlotStatus { available occupied }
+
+enum VehicleType { car bike truck bus other }
+
+enum RoundingPolicy { nearest_15m per_hour }
+
+enum PaymentMode { cash card upi wallet }
+
+model User {
+  id            String  @id @default(uuid())
+  username      String  @unique
+  password_hash String
+  role          Role
+  created_at    DateTime @default(now())
+}
+
+model Vehicle {
+  id             String      @id @default(uuid())
+  vehicle_number String      @unique
+  vehicle_type   VehicleType
+  owner_name     String?
+  contact_no     String?
+  created_at     DateTime    @default(now())
+  logs           ParkingLog[]
+}
+
+model ParkingSlot {
+  id        String     @id @default(uuid())
+  slot_no   String     @unique
+  type      SlotType
+  status    SlotStatus
+  level     String?
+  zone      String?
+  created_at DateTime  @default(now())
+  logs      ParkingLog[]
+  @@index([type, status])
+}
+
+model ParkingLog {
+  id            String     @id @default(uuid())
+  vehicle_id    String
+  slot_id       String
+  checkin_time  DateTime   @default(now())
+  checkout_time DateTime?
+  total_minutes Int?
+  bill_amount   Decimal?
+  status        String
+  driver_name   String?
+  driver_phone  String?
+  vehicle       Vehicle    @relation(fields: [vehicle_id], references: [id])
+  slot          ParkingSlot @relation(fields: [slot_id], references: [id])
+  billing       Billing?
+  @@index([slot_id, status])
+  @@index([checkin_time])
+  @@index([checkout_time])
+  @@unique([vehicle_id], map: "unique_active_vehicle") @db.UniqueIndex(length: 0)
+}
+
+model Billing {
+  id            String   @id @default(uuid())
+  log_id        String   @unique
+  payment_mode  PaymentMode
+  bill_pdf_path String
+  amount        Decimal
+  created_at    DateTime @default(now())
+  parking_log   ParkingLog @relation(fields: [log_id], references: [id])
+}
+
+model RateCard {
+  id              String          @id @default(uuid())
+  vehicle_type    VehicleType
+  rate_per_hour   Decimal
+  rounding_policy RoundingPolicy
+  grace_minutes   Int @default(0)
+  currency        String @default("USD")
+  effective_from  DateTime
+  active          Boolean @default(true)
+}
+
+model Setting {
+  id    String @id @default("singleton")
+  key   String @unique
+  value String
+}

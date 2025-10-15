@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+.pnp.cjs
+.pnp.loader.mjs
+
+# Envs
+.env
+apps/api/.env
+apps/web/.env
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# Builds
+coverage/
+dist/
+.next/
+.vercel/
+
+# Prisma
+apps/api/prisma/dev.db
+
+# Storage
+apps/api/storage/

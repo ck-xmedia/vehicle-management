@@ -1,0 +1,17 @@
+{
+  "name": "parking-monorepo",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "pnpm --filter @parking/api dev",
+    "dev:web": "pnpm --filter @parking/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "echo 'lint step placeholder'",
+    "postinstall": "pnpm -r install"
+  }
+}

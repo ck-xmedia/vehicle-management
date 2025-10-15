@@ -1,0 +1,12 @@
+FROM node:20-alpine as base
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/package.json
+COPY packages/common/package.json packages/common/package.json
+RUN npm i -g pnpm@9 && pnpm install --frozen-lockfile
+COPY packages ./packages
+COPY apps/api ./apps/api
+WORKDIR /app/apps/api
+RUN pnpm prisma:generate && pnpm build
+EXPOSE 4000
+CMD ["pnpm", "start"]

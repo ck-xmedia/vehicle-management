@@ -1,0 +1,51 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        ports: ['5432:5432']
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: parking_db
+        options: >-
+          --health-cmd=\"pg_isready -U postgres\" 
+          --health-interval=10s 
+          --health-timeout=5s 
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+      - run: pnpm install
+      - name: Generate Prisma Client
+        run: pnpm --filter @parking/api prisma:generate
+      - name: Migrate DB
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/parking_db
+        run: pnpm --filter @parking/api prisma:migrate
+      - name: Seed DB
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/parking_db
+          JWT_SECRET: testsecret
+        run: pnpm --filter @parking/api prisma:seed
+      - name: Backend Tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/parking_db
+          JWT_SECRET: testsecret
+        run: pnpm --filter @parking/api test
+      - name: Frontend Build
+        env:
+          NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+        run: pnpm --filter @parking/web build
