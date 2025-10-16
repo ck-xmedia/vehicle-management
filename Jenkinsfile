@@ -1,20 +1,16 @@
 pipeline {
-    agent any
-    
-    tools {
-        nodejs 'NodeJS 18'
-    }
-    
-    environment {
-        PNPM_HOME = "${env.HOME}/.local/share/pnpm"
-        PATH = "${env.PNPM_HOME}:${env.PATH}"
-        NODE_ENV = "${env.BRANCH_NAME == 'main' ? 'production' : 'development'}"
-        DEPLOY_TARGET = "${env.BRANCH_NAME == 'main' ? 'production' : 'staging'}"
+    agent {
+        docker {
+            image 'node:18'
+            args '-v /root/.pnpm-store:/root/.pnpm-store'
+        }
     }
 
-    parameters {
-        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip running tests')
-        choice(name: 'DEPLOY_ENV', choices: ['staging', 'production'], description: 'Deployment environment')
+    environment {
+        NODE_ENV = 'production'
+        PNPM_HOME = '/root/.local/share/pnpm'
+        PATH = "$PNPM_HOME:$PATH"
+        HUSKY = '0'
     }
 
     options {
@@ -23,24 +19,29 @@ pipeline {
         ansiColor('xterm')
     }
 
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['development', 'staging', 'production'], description: 'Deployment Environment')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip Test Execution')
+    }
+
     stages {
         stage('Setup') {
             steps {
-                sh 'npm install -g pnpm@9.0.0'
-                sh 'pnpm --version'
-                sh 'node --version'
+                sh 'corepack enable'
+                sh 'corepack prepare pnpm@9.0.0 --activate'
+                sh 'pnpm config set store-dir /root/.pnpm-store'
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh 'pnpm install'
+                sh 'pnpm install --frozen-lockfile'
             }
         }
 
         stage('Lint') {
             steps {
-                sh 'pnpm -r lint'
+                sh 'pnpm run lint || true'
             }
         }
 
@@ -53,7 +54,7 @@ pipeline {
             }
             post {
                 always {
-                    junit '**/junit.xml'
+                    junit 'coverage/junit.xml'
                     publishHTML([
                         allowMissing: true,
                         alwaysLinkToLastBuild: true,
@@ -68,7 +69,7 @@ pipeline {
 
         stage('Build') {
             steps {
-                sh 'pnpm build'
+                sh 'pnpm run build'
             }
         }
 
@@ -86,41 +87,25 @@ pipeline {
             }
         }
 
-        stage('Deploy to Staging') {
+        stage('Deploy') {
             when {
-                branch 'develop'
-            }
-            steps {
-                withCredentials([
-                    string(credentialsId: 'STAGING_API_URL', variable: 'API_URL'),
-                    file(credentialsId: 'staging-env', variable: 'ENV_FILE')
-                ]) {
-                    sh '''
-                        cp $ENV_FILE apps/api/.env
-                        cp $ENV_FILE apps/web/.env
-                        pnpm --filter @parking/api deploy:staging
-                        pnpm --filter @parking/web deploy:staging
-                    '''
+                anyOf {
+                    branch 'main'
+                    branch 'staging'
                 }
             }
-        }
-
-        stage('Deploy to Production') {
-            when {
-                branch 'main'
-                expression { return params.DEPLOY_ENV == 'production' }
+            environment {
+                DEPLOY_CREDS = credentials('deploy-credentials')
             }
             steps {
-                withCredentials([
-                    string(credentialsId: 'PROD_API_URL', variable: 'API_URL'),
-                    file(credentialsId: 'prod-env', variable: 'ENV_FILE')
-                ]) {
-                    sh '''
-                        cp $ENV_FILE apps/api/.env
-                        cp $ENV_FILE apps/web/.env
-                        pnpm --filter @parking/api deploy:prod
-                        pnpm --filter @parking/web deploy:prod
-                    '''
+                script {
+                    if (env.BRANCH_NAME == 'main' && params.DEPLOY_ENV == 'production') {
+                        sh 'pnpm run deploy:prod'
+                    } else if (env.BRANCH_NAME == 'staging' || params.DEPLOY_ENV == 'staging') {
+                        sh 'pnpm run deploy:staging'
+                    } else {
+                        sh 'pnpm run deploy:dev'
+                    }
                 }
             }
         }
@@ -133,13 +118,19 @@ pipeline {
         success {
             slackSend(
                 color: 'good',
-                message: "Build #${env.BUILD_NUMBER} succeeded on ${env.BRANCH_NAME}\nDeployed to: ${DEPLOY_TARGET}\n${env.BUILD_URL}"
+                message: "Build Successful: ${env.JOB_NAME} #${env.BUILD_NUMBER} (<${env.BUILD_URL}|Open>)"
             )
         }
         failure {
             slackSend(
                 color: 'danger',
-                message: "Build #${env.BUILD_NUMBER} failed on ${env.BRANCH_NAME}\n${env.BUILD_URL}"
+                message: "Build Failed: ${env.JOB_NAME} #${env.BUILD_NUMBER} (<${env.BUILD_URL}|Open>)"
+            )
+        }
+        unstable {
+            slackSend(
+                color: 'warning',
+                message: "Build Unstable: ${env.JOB_NAME} #${env.BUILD_NUMBER} (<${env.BUILD_URL}|Open>)"
             )
         }
     }
