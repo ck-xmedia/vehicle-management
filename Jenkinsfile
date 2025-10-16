@@ -1,107 +1,146 @@
 pipeline {
     agent any
-
+    
+    tools {
+        nodejs 'NodeJS 18'
+    }
+    
     environment {
-        PROJECT_NAME = '5563264e-5c74-4585-a39f-3e84a7c5bef5'
-        NODE_VERSION = '18'
-        NPM_CONFIG_CACHE = '${WORKSPACE}/.npm'
-        DOCKER_REGISTRY = credentials('docker-registry')
-        DOCKER_IMAGE = '${PROJECT_NAME}:latest'
+        PNPM_HOME = "${env.HOME}/.local/share/pnpm"
+        PATH = "${env.PNPM_HOME}:${env.PATH}"
+        NODE_ENV = "${env.BRANCH_NAME == 'main' ? 'production' : 'development'}"
+        DEPLOY_TARGET = "${env.BRANCH_NAME == 'main' ? 'production' : 'staging'}"
+    }
+
+    parameters {
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip running tests')
+        choice(name: 'DEPLOY_ENV', choices: ['staging', 'production'], description: 'Deployment environment')
+    }
+
+    options {
+        timeout(time: 1, unit: 'HOURS')
+        disableConcurrentBuilds()
+        ansiColor('xterm')
     }
 
     stages {
-        stage('Checkout') {
+        stage('Setup') {
             steps {
-                echo 'Checking out source code...'
-                checkout scm
-                sh 'git rev-parse --short HEAD > .git/commit-id'
-                script {
-                    env.GIT_COMMIT_SHORT = readFile('.git/commit-id').trim()
-                }
-            }
-        }
-
-        stage('Setup Environment') {
-            steps {
-                echo 'Setting up build environment...'
+                sh 'npm install -g pnpm@9.0.0'
+                sh 'pnpm --version'
                 sh 'node --version'
-                sh 'npm --version'
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                echo 'Installing dependencies...'
-                // Monorepo: Install dependencies for all packages
-                dir('packages/common') {
-                    sh 'npm install'
-                }
-                dir('apps/api') {
-                    sh 'npm install'
-                }
-                dir('apps/web') {
-                    sh 'npm install'
-                }
+                sh 'pnpm install'
             }
         }
 
-        stage('Code Quality') {
+        stage('Lint') {
             steps {
-                echo 'Running code quality checks...'
-                sh 'npm run lint'
+                sh 'pnpm -r lint'
+            }
+        }
+
+        stage('Test') {
+            when {
+                expression { return !params.SKIP_TESTS }
+            }
+            steps {
+                sh 'pnpm test'
+            }
+            post {
+                always {
+                    junit '**/junit.xml'
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'coverage',
+                        reportFiles: 'index.html',
+                        reportName: 'Coverage Report'
+                    ])
+                }
             }
         }
 
         stage('Build') {
             steps {
-                echo 'Building application...'
-                dir('packages/common') {
-                    sh 'npm run build || echo "No build script"'
-                }
-                dir('apps/api') {
-                    sh 'npm run build || echo "No build script"'
-                }
-                dir('apps/web') {
-                    sh 'npm run build || echo "No build script"'
-                }
+                sh 'pnpm build'
             }
         }
 
-        stage('Test') {
+        stage('SonarQube Analysis') {
+            when {
+                branch 'main'
+            }
             steps {
-                echo 'Running tests...'
-                dir('packages/common') {
-                    sh 'npm test || true'
-                }
-                dir('apps/api') {
-                    sh 'npm test || true'
-                }
-                dir('apps/web') {
-                    sh 'npm test || true'
-                }
-            }
-            post {
-                always {
-                    junit '**/test-results/**/*.xml' // Collect test results
+                withSonarQubeEnv('SonarQube') {
+                    sh 'sonar-scanner \
+                        -Dsonar.projectKey=vehicle-management \
+                        -Dsonar.sources=. \
+                        -Dsonar.exclusions=**/node_modules/**,**/coverage/**,**/dist/**'
                 }
             }
         }
 
+        stage('Deploy to Staging') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'STAGING_API_URL', variable: 'API_URL'),
+                    file(credentialsId: 'staging-env', variable: 'ENV_FILE')
+                ]) {
+                    sh '''
+                        cp $ENV_FILE apps/api/.env
+                        cp $ENV_FILE apps/web/.env
+                        pnpm --filter @parking/api deploy:staging
+                        pnpm --filter @parking/web deploy:staging
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+                expression { return params.DEPLOY_ENV == 'production' }
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'PROD_API_URL', variable: 'API_URL'),
+                    file(credentialsId: 'prod-env', variable: 'ENV_FILE')
+                ]) {
+                    sh '''
+                        cp $ENV_FILE apps/api/.env
+                        cp $ENV_FILE apps/web/.env
+                        pnpm --filter @parking/api deploy:prod
+                        pnpm --filter @parking/web deploy:prod
+                    '''
+                }
+            }
+        }
     }
 
     post {
-        success {
-            echo 'Pipeline completed successfully! ✅'
-        }
-
-        failure {
-            echo 'Pipeline failed! ❌'
-        }
-
         always {
-            echo 'Cleaning up workspace...'
             cleanWs()
         }
+        success {
+            slackSend(
+                color: 'good',
+                message: "Build #${env.BUILD_NUMBER} succeeded on ${env.BRANCH_NAME}\nDeployed to: ${DEPLOY_TARGET}\n${env.BUILD_URL}"
+            )
+        }
+        failure {
+            slackSend(
+                color: 'danger',
+                message: "Build #${env.BUILD_NUMBER} failed on ${env.BRANCH_NAME}\n${env.BUILD_URL}"
+            )
+        }
     }
-
 }
