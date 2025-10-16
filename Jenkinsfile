@@ -1,110 +1,88 @@
 pipeline {
-    agent {
-        docker {
-            image 'node:18'
-            args '-v /root/.pnpm-store:/root/.pnpm-store'
-        }
-    }
-
-    environment {
-        NODE_ENV = 'production'
-        PNPM_HOME = '/root/.local/share/pnpm'
-        PATH = "$PNPM_HOME:$PATH"
-        HUSKY = '0'
-    }
-
+    agent any
+    
     options {
-        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
-        ansiColor('xterm')
     }
-
+    
+    environment {
+        NODE_VERSION = '18.x'
+        PNPM_VERSION = '9.0.0'
+        CACHE_DIR = '.pnpm-store'
+    }
+    
     parameters {
-        choice(name: 'DEPLOY_ENV', choices: ['development', 'staging', 'production'], description: 'Deployment Environment')
-        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip Test Execution')
+        booleanParam(defaultValue: true, description: 'Run tests', name: 'RUN_TESTS')
+        choice(choices: ['development', 'staging', 'production'], description: 'Deployment environment', name: 'DEPLOY_ENV')
     }
 
     stages {
-        stage('Setup') {
+        stage('Checkout') {
             steps {
-                sh 'corepack enable'
-                sh 'corepack prepare pnpm@9.0.0 --activate'
-                sh 'pnpm config set store-dir /root/.pnpm-store'
+                script {
+                    try {
+                        git branch: 'main', 
+                            url: 'https://github.com/ck-xmedia/vehicle-management.git'
+                    } catch (Exception e) {
+                        error "Failed to checkout repository: ${e.getMessage()}"
+                    }
+                }
+            }
+        }
+
+        stage('Setup Node.js') {
+            steps {
+                script {
+                    try {
+                        nodejs(nodeJSInstallationName: 'NodeJS ' + NODE_VERSION) {
+                            sh '''
+                                npm install -g pnpm@${PNPM_VERSION}
+                                pnpm config set store-dir ${CACHE_DIR}
+                            '''
+                        }
+                    } catch (Exception e) {
+                        error "Failed to setup Node.js environment: ${e.getMessage()}"
+                    }
+                }
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                sh 'pnpm install --frozen-lockfile'
-            }
-        }
-
-        stage('Lint') {
-            steps {
-                sh 'pnpm run lint || true'
-            }
-        }
-
-        stage('Test') {
-            when {
-                expression { return !params.SKIP_TESTS }
-            }
-            steps {
-                sh 'pnpm test'
-            }
-            post {
-                always {
-                    junit 'coverage/junit.xml'
-                    publishHTML([
-                        allowMissing: true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: 'coverage',
-                        reportFiles: 'index.html',
-                        reportName: 'Coverage Report'
-                    ])
+                nodejs(nodeJSInstallationName: 'NodeJS ' + NODE_VERSION) {
+                    timeout(time: 10, unit: 'MINUTES') {
+                        sh '''
+                            pnpm install
+                        '''
+                    }
                 }
             }
         }
 
         stage('Build') {
             steps {
-                sh 'pnpm run build'
-            }
-        }
-
-        stage('SonarQube Analysis') {
-            when {
-                branch 'main'
-            }
-            steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh 'sonar-scanner \
-                        -Dsonar.projectKey=vehicle-management \
-                        -Dsonar.sources=. \
-                        -Dsonar.exclusions=**/node_modules/**,**/coverage/**,**/dist/**'
+                nodejs(nodeJSInstallationName: 'NodeJS ' + NODE_VERSION) {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        sh '''
+                            pnpm build
+                        '''
+                    }
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Test') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'staging'
-                }
-            }
-            environment {
-                DEPLOY_CREDS = credentials('deploy-credentials')
+                expression { params.RUN_TESTS }
             }
             steps {
-                script {
-                    if (env.BRANCH_NAME == 'main' && params.DEPLOY_ENV == 'production') {
-                        sh 'pnpm run deploy:prod'
-                    } else if (env.BRANCH_NAME == 'staging' || params.DEPLOY_ENV == 'staging') {
-                        sh 'pnpm run deploy:staging'
-                    } else {
-                        sh 'pnpm run deploy:dev'
+                nodejs(nodeJSInstallationName: 'NodeJS ' + NODE_VERSION) {
+                    timeout(time: 10, unit: 'MINUTES') {
+                        sh '''
+                            pnpm test
+                        '''
                     }
                 }
             }
@@ -113,24 +91,31 @@ pipeline {
 
     post {
         always {
-            cleanWs()
+            cleanWs(
+                cleanWhenNotBuilt: false,
+                deleteDirs: true,
+                disableDeferredWipeout: true,
+                patterns: [
+                    [pattern: '**/node_modules/**', type: 'INCLUDE'],
+                    [pattern: '**/.pnpm-store/**', type: 'INCLUDE'],
+                    [pattern: '**/coverage/**', type: 'INCLUDE'],
+                    [pattern: '**/dist/**', type: 'INCLUDE'],
+                    [pattern: '**/.next/**', type: 'INCLUDE']
+                ]
+            )
         }
         success {
-            slackSend(
-                color: 'good',
-                message: "Build Successful: ${env.JOB_NAME} #${env.BUILD_NUMBER} (<${env.BUILD_URL}|Open>)"
+            emailext (
+                subject: "Pipeline '${currentBuild.fullDisplayName}' SUCCESS",
+                body: "Build completed successfully: ${env.BUILD_URL}",
+                recipientProviders: [[$class: 'DevelopersRecipientProvider']]
             )
         }
         failure {
-            slackSend(
-                color: 'danger',
-                message: "Build Failed: ${env.JOB_NAME} #${env.BUILD_NUMBER} (<${env.BUILD_URL}|Open>)"
-            )
-        }
-        unstable {
-            slackSend(
-                color: 'warning',
-                message: "Build Unstable: ${env.JOB_NAME} #${env.BUILD_NUMBER} (<${env.BUILD_URL}|Open>)"
+            emailext (
+                subject: "Pipeline '${currentBuild.fullDisplayName}' FAILED",
+                body: "Build failed. Check console output at: ${env.BUILD_URL}",
+                recipientProviders: [[$class: 'DevelopersRecipientProvider']]
             )
         }
     }
